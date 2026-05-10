@@ -8,8 +8,11 @@ from runware import Runware, IImageInference, IVideoInference
 from dotenv import load_dotenv
 from jose import jwt
 from motor.motor_asyncio import AsyncIOMotorClient
-from models import UserUsage, UserData
+from models import UserUsage, UserData, ImageHistory
 from safety import check_prompt_safety
+from imagekitio import ImageKit
+import uuid
+import time
 
 # Load environment variables
 load_dotenv(override=True)
@@ -23,6 +26,19 @@ runware = Runware(api_key=RUNWARE_API_KEY)
 # MongoDB and Clerk Configuration
 MONGO_URL = os.getenv("MONGO_URL")
 DAILY_LIMIT = 20
+
+# ImageKit Configuration
+IMAGEKIT_PRIVATE_KEY = os.getenv("IMAGEKIT_PRIVATE_KEY")
+IMAGEKIT_PUBLIC_KEY = os.getenv("IMAGEKIT_PUBLIC_KEY")
+IMAGEKIT_URL_ENDPOINT = os.getenv("IMAGEKIT_URL_ENDPOINT")
+
+imagekit = None
+if IMAGEKIT_PRIVATE_KEY and IMAGEKIT_PUBLIC_KEY and IMAGEKIT_URL_ENDPOINT:
+    imagekit = ImageKit(
+        private_key=IMAGEKIT_PRIVATE_KEY,
+        public_key=IMAGEKIT_PUBLIC_KEY,
+        url_endpoint=IMAGEKIT_URL_ENDPOINT
+    )
 
 # Load Clerk Public Key from file (safest)
 CLERK_JWT_PUBLIC_KEY = None
@@ -41,6 +57,7 @@ async def startup_event():
     print(f"CLERK_JWT_PUBLIC_KEY: {'✅ Found' if CLERK_JWT_PUBLIC_KEY else '❌ Missing'}")
     if CLERK_JWT_PUBLIC_KEY:
         print(f"Clerk Key Length: {len(CLERK_JWT_PUBLIC_KEY)} chars")
+    print(f"ImageKit Integration: {'✅ Active' if imagekit else '❌ Missing Keys'}")
     print("-----------------------------------\n")
     
     await runware.connect()
@@ -161,6 +178,7 @@ async def get_profile(user: dict = Depends(verify_token)):
         "ad_credits_earned_today": user_data.ad_credits_earned_today
     }
 
+
 @app.post("/add-reward-credits")
 async def add_reward_credits(user: dict = Depends(verify_token)):
     user_id = user["sub"]
@@ -232,6 +250,7 @@ class T2IRequest(BaseModel):
     aspect_ratio: Optional[str] = "1:1" # 1:1, 16:9, 9:16, 4:3, 3:4
     style: Optional[str] = None
     quality: Optional[str] = "medium" # low, medium, high
+    original_prompt: Optional[str] = None
 
 class I2IRequest(BaseModel):
     prompt: str
@@ -239,6 +258,7 @@ class I2IRequest(BaseModel):
     aspect_ratio: Optional[str] = "1:1"
     style: Optional[str] = None
     quality: Optional[str] = "medium"
+    original_prompt: Optional[str] = None
 
 class DeleteAccountRequest(BaseModel):
     reason: str
@@ -249,6 +269,7 @@ class VideoRequest(BaseModel):
     aspect_ratio: Optional[str] = "16:9"
     duration: Optional[int] = 2
     audio: Optional[bool] = False
+    original_prompt: Optional[str] = None
 
 def get_dimensions(aspect_ratio: str):
     ratios = {
@@ -298,11 +319,39 @@ async def text_to_image(request: T2IRequest, user: dict = Depends(check_limit_an
         if not images:
             raise HTTPException(status_code=500, detail="No image generated")
         
+        # Get Runware URL
+        final_url = images[0].imageURL
+        
+        # Upload to ImageKit if configured
+        if imagekit:
+            try:
+                filename = f"gen_{int(time.time())}_{uuid.uuid4().hex[:8]}.jpg"
+                upload_resp = imagekit.upload_file(
+                    file=final_url,
+                    file_name=filename
+                )
+                if upload_resp and upload_resp.url:
+                    final_url = upload_resp.url
+            except Exception as ik_err:
+                print(f"ImageKit upload warning: {str(ik_err)}")
+
+        # Save to Image History
+        try:
+            history_entry = ImageHistory(
+                user_id=user_id,
+                url=final_url,
+                prompt=request.original_prompt or request.prompt,
+                type="text-to-image"
+            )
+            await db.image_history.insert_one(history_entry.model_dump())
+        except Exception as e:
+            print(f"Failed to save image history: {str(e)}")
+
         # Track usage after successful generation
         remaining_credits = await track_usage(user_id)
         
         return {
-            "url": images[0].imageURL,
+            "url": final_url,
             "cost": images[0].cost,
             "remaining_credits": remaining_credits
         }
@@ -344,11 +393,39 @@ async def image_to_image(request: I2IRequest, user: dict = Depends(check_limit_a
         if not images:
             raise HTTPException(status_code=500, detail="No image generated")
         
+        # Get Runware URL
+        final_url = images[0].imageURL
+        
+        # Upload to ImageKit if configured
+        if imagekit:
+            try:
+                filename = f"gen_{int(time.time())}_{uuid.uuid4().hex[:8]}.jpg"
+                upload_resp = imagekit.upload_file(
+                    file=final_url,
+                    file_name=filename
+                )
+                if upload_resp and upload_resp.url:
+                    final_url = upload_resp.url
+            except Exception as ik_err:
+                print(f"ImageKit upload warning: {str(ik_err)}")
+
+        # Save to Image History
+        try:
+            history_entry = ImageHistory(
+                user_id=user_id,
+                url=final_url,
+                prompt=request.original_prompt or request.prompt,
+                type="image-to-image"
+            )
+            await db.image_history.insert_one(history_entry.model_dump())
+        except Exception as e:
+            print(f"Failed to save image history: {str(e)}")
+
         # Track usage after successful generation
         remaining_credits = await track_usage(user_id)
 
         return {
-            "url": images[0].imageURL,
+            "url": final_url,
             "cost": images[0].cost,
             "remaining_credits": remaining_credits
         }
@@ -357,6 +434,27 @@ async def image_to_image(request: I2IRequest, user: dict = Depends(check_limit_a
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/image-history")
+async def get_image_history(user: dict = Depends(verify_token)):
+    try:
+        user_id = user["sub"]
+        # Fetch last 50 images for the user, newest first
+        cursor = db.image_history.find({"user_id": user_id}).sort("created_at", -1).limit(50)
+        history = await cursor.to_list(length=50)
+        
+        # Format for response
+        for entry in history:
+            entry["_id"] = str(entry.pop("_id"))
+            if "created_at" in entry and isinstance(entry["created_at"], datetime):
+                entry["created_at"] = entry["created_at"].isoformat()
+                
+        return history
+    except Exception as e:
+        print(f"ERROR in get_image_history: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 
 @app.post("/request-delete-account")
 async def request_delete_account(request: DeleteAccountRequest, user: dict = Depends(verify_token)):

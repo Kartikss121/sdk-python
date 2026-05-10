@@ -7,3 +7,4 @@ uvicorn>=0.30.0
 motor>=3.6.0
 python-jose[cryptography]>=3.3.0
 pydantic-settings>=2.6.0
+imagekitio>=3.0.0,<5.0.0

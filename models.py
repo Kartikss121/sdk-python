@@ -22,3 +22,12 @@ class UserData(BaseModel):
     ads_watched_today: int = Field(default=0, ge=0)
     ad_credits_earned_today: int = Field(default=0, ge=0)
     last_ad_date: Optional[str] = None # YYYY-MM-DD
+
+class ImageHistory(BaseModel):
+    model_config = ConfigDict(extra='ignore', populate_by_name=True)
+    
+    user_id: str
+    url: str
+    prompt: str
+    type: str # "text-to-image" or "image-to-image"
+    created_at: datetime = Field(default_factory=datetime.utcnow)
