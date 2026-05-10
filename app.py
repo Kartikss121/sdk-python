@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from jose import jwt
 from motor.motor_asyncio import AsyncIOMotorClient
 from models import UserUsage, UserData
+from safety import check_prompt_safety
 
 # Load environment variables
 load_dotenv(override=True)
@@ -239,6 +240,9 @@ class I2IRequest(BaseModel):
     style: Optional[str] = None
     quality: Optional[str] = "medium"
 
+class DeleteAccountRequest(BaseModel):
+    reason: str
+
 class VideoRequest(BaseModel):
     prompt: str
     source_url: Optional[str] = None
@@ -252,7 +256,8 @@ def get_dimensions(aspect_ratio: str):
         "16:9": (1344, 768),
         "9:16": (768, 1344),
         "4:3": (1152, 864),
-        "3:4": (864, 1152)
+        "3:4": (864, 1152),
+        "2:3": (832, 1216)
     }
     return ratios.get(aspect_ratio, (1024, 1024))
 
@@ -266,6 +271,9 @@ def get_steps(quality: str):
 
 @app.post("/text-to-image")
 async def text_to_image(request: T2IRequest, user: dict = Depends(check_limit_and_credits)):
+    # Check prompt safety before proceeding (will raise 400 if unsafe)
+    check_prompt_safety(request.prompt)
+
     try:
         user_id = user["sub"]
         width, height = get_dimensions(request.aspect_ratio)
@@ -306,6 +314,9 @@ async def text_to_image(request: T2IRequest, user: dict = Depends(check_limit_an
 
 @app.post("/image-to-image")
 async def image_to_image(request: I2IRequest, user: dict = Depends(check_limit_and_credits)):
+    # Check prompt safety before proceeding (will raise 400 if unsafe)
+    check_prompt_safety(request.prompt)
+
     try:
         user_id = user["sub"]
         width, height = get_dimensions(request.aspect_ratio)
@@ -343,6 +354,29 @@ async def image_to_image(request: I2IRequest, user: dict = Depends(check_limit_a
         }
     except Exception as e:
         print(f"ERROR in image_to_image: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/request-delete-account")
+async def request_delete_account(request: DeleteAccountRequest, user: dict = Depends(verify_token)):
+    try:
+        user_id = user["sub"]
+        email = user.get("email", "")
+        
+        delete_request = {
+            "user_id": user_id,
+            "email": email,
+            "reason": request.reason,
+            "status": "pending",
+            "requested_at": datetime.utcnow().isoformat()
+        }
+        
+        await db.delete_requests.insert_one(delete_request)
+        
+        return {"success": True, "message": "Delete account request submitted successfully"}
+    except Exception as e:
+        print(f"ERROR in request_delete_account: {str(e)}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
