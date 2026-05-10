@@ -133,7 +133,7 @@ async def get_profile(user: dict = Depends(verify_token)):
     if not user_doc:
         # Create user if they don't exist yet
         email = user.get("email")
-        new_user = UserData(user_id=user_id, email=email, credits=10)
+        new_user = UserData(user_id=user_id, email=email, credits=3)
         await db.users.insert_one(new_user.model_dump())
         user_doc = new_user.model_dump()
     else:
