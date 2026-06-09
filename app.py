@@ -103,10 +103,19 @@ async def check_limit_and_credits(user_payload: dict = Depends(verify_token)):
         
         user_doc = await db.users.find_one({"user_id": user_id})
         if not user_doc:
-            # Auto-create user with 3 free credits and email if not exists
-            new_user = UserData(user_id=user_id, email=email, credits=3)
-            await db.users.insert_one(new_user.model_dump())
-            user_doc = new_user.model_dump()
+            # Check if user exists with this email due to previous signup or login method
+            if email:
+                user_doc = await db.users.find_one({"email": email})
+                if user_doc:
+                    # Update existing user's user_id to the new one
+                    await db.users.update_one({"_id": user_doc["_id"]}, {"$set": {"user_id": user_id}})
+                    user_doc["user_id"] = user_id
+            
+            if not user_doc:
+                # Auto-create user with 3 free credits and email if not exists
+                new_user = UserData(user_id=user_id, email=email, credits=3)
+                await db.users.insert_one(new_user.model_dump())
+                user_doc = new_user.model_dump()
         else:
             # Update email if it changed or was missing
             if email and user_doc.get("email") != email:
@@ -146,13 +155,22 @@ async def get_profile(user: dict = Depends(verify_token)):
     user_id = user["sub"]
     user_doc = await db.users.find_one({"user_id": user_id})
     today = datetime.utcnow().date().isoformat()
+    email = user.get("email")
     
     if not user_doc:
-        # Create user if they don't exist yet
-        email = user.get("email")
-        new_user = UserData(user_id=user_id, email=email, credits=3)
-        await db.users.insert_one(new_user.model_dump())
-        user_doc = new_user.model_dump()
+        # Check if user exists with this email due to previous signup or login method
+        if email:
+            user_doc = await db.users.find_one({"email": email})
+            if user_doc:
+                # Update existing user's user_id to the new one
+                await db.users.update_one({"_id": user_doc["_id"]}, {"$set": {"user_id": user_id}})
+                user_doc["user_id"] = user_id
+        
+        if not user_doc:
+            # Create user if they don't exist yet
+            new_user = UserData(user_id=user_id, email=email, credits=3)
+            await db.users.insert_one(new_user.model_dump())
+            user_doc = new_user.model_dump()
     else:
         # Check for date reset
         if user_doc.get("last_ad_date") != today:
